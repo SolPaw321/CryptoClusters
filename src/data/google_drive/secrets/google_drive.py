@@ -1,0 +1,6 @@
+SCOPES = ['https://www.googleapis.com/auth/drive']
+
+
+CRYPTO_CLUSTERS_FOLDER_ID = '11jBUISmCDUP3nrGm1zKW2AryCnPwWGZv'
+ADDRESSES_FOLDER_ID = '1A38QjfXBWWQsOK8wKxCq3learcqLEh1-'
+SINK_FOLDER_ID = '1odWNnT9Xq0GpdqQ6zvYn5AooaMqcGoT0'
