@@ -12,20 +12,19 @@ from src.google_drive.folders_ids import *
 class GoogleDriveHandler:
     def __init__(self):
         self.SCOPES = SCOPES
-        self.service = self.__authenticate()
 
         __GOOGLE_DRIVE = Path(__file__).resolve().parent
         __GOOGLE_DRIVE_SECRETS = __GOOGLE_DRIVE / "secrets"
-        self.__TOKEN = os.path.join(__GOOGLE_DRIVE_SECRETS, "token.pickle")
-        self.__CLIENT_SECRETS = os.path.join(__GOOGLE_DRIVE_SECRETS, "client_secrets.json")
+        self.TOKEN = os.path.join(__GOOGLE_DRIVE_SECRETS, "token.pickle")
+        self.CLIENT_SECRETS = os.path.join(__GOOGLE_DRIVE_SECRETS, "client_secrets.json")
+
+        self.service = self.__authenticate()
 
 
     def __authenticate(self):
         creds = None
-
-
-        if os.path.exists(self.__TOKEN):
-            with open(self.__TOKEN, "rb") as token:
+        if os.path.exists(self.TOKEN):
+            with open(self.TOKEN, "rb") as token:
                 creds = pickle.load(token)
 
         if not creds or not creds.valid:
@@ -33,12 +32,12 @@ class GoogleDriveHandler:
                 creds.refresh(Request())
             else:
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    self.__CLIENT_SECRETS,
+                    self.CLIENT_SECRETS,
                     self.SCOPES
                 )
                 creds = flow.run_local_server(port=0)
 
-            with open(self.__TOKEN, "wb") as token:
+            with open(self.TOKEN, "wb") as token:
                 pickle.dump(creds, token)
 
         return build("drive", "v3", credentials=creds)
