@@ -1,11 +1,11 @@
 from pathlib import Path
 
-__current_folder = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+SRC = PROJECT_ROOT / "src"
 
-CRYPTO_CLUSTERS = __current_folder.parent.parent
-
-SRC = CRYPTO_CLUSTERS / "src"
-
-DATA = SRC / "data"
+DATA = PROJECT_ROOT / "data"
+DATA.mkdir(parents=True, exist_ok=True)
 ADDRESSES = DATA / "addresses"
-ADDRESSES_STORE =  ADDRESSES / "store"
+ADDRESSES.mkdir(parents=True, exist_ok=True)
+ADDRESSES_TEMP = ADDRESSES / "temp"
+ADDRESSES_TEMP.mkdir(parents=True, exist_ok=True)
