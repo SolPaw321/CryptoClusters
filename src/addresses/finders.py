@@ -38,6 +38,9 @@ class TransactionSink:
         self._ensure_csv_exists()
 
     def _ensure_csv_exists(self) -> None:
+        """
+        Ensure that csv file exists.
+        """
         try:
             with open(self.csv_path, "x", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self.COL_ORDER)
@@ -46,6 +49,12 @@ class TransactionSink:
             pass
 
     def add(self, record: TransactionRecord) -> bool:
+        """
+        Add unique wallet address to memory.
+
+        :param record: a transaction record
+        :return: True if unique address, False otherwise.
+        """
         if record.address in self._seen_addresses:
             return False
 
@@ -54,6 +63,9 @@ class TransactionSink:
         return True
 
     def save_to_csv(self):
+        """
+        Save collected wallet addresses to csv file and free memory.
+        """
         with open(self.csv_path, "a", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=self.COL_ORDER)
             writer.writerows(self._collected_wallets)
@@ -61,10 +73,17 @@ class TransactionSink:
         self._collected_wallets = list()
         self._seen_addresses = set()
 
-    def n_wallets_founded(self):
+    def n_wallets_founded(self) -> int:
+        """
+        Number of unique wallets founded.
+        :return: number of unique wallets
+        """
         return len(self._seen_addresses)
 
 class BaseSource(ABC):
+    """
+    Abstract class for wallets addresses finders.
+    """
     def __init__(self, name: str, sink: TransactionSink) -> None:
         self.name = name
         self.sink = sink
@@ -79,6 +98,9 @@ class BaseSource(ABC):
 
 
 class TradesSource(BaseSource):
+    """
+    Search transactions in "real time" on given markets (coins) for collecting unique wallet addresses.
+    """
     WS_URL = "wss://api.hyperliquid.xyz/ws"
 
     def __init__(
@@ -101,16 +123,24 @@ class TradesSource(BaseSource):
         self.max_wallets_found = 1000
 
     def start(self, *, max_running_time=None, max_wallets_found=None) -> None:
+        """
+        On start connection.
+
+        Run a connection on a separate thread.
+
+        :param max_running_time: maximum running time in seconds
+        :param max_wallets_found: maximum number of unique wallets addresses to found
+        """
+        if self._running:
+            return
+        self._running = True
+
+        if max_running_time is not None and type(max_running_time)==int:
+            self.max_running_time = max_running_time
+        if max_wallets_found is not None and type(max_wallets_found)==int:
+            self.max_wallets_found = max_wallets_found
+
         try:
-            if self._running:
-                return
-
-            if max_running_time is not None and type(max_running_time)==int:
-                self.max_running_time = max_running_time
-            if max_wallets_found is not None and type(max_wallets_found)==int:
-                self.max_wallets_found = max_wallets_found
-
-            self._running = True
             self._thread = threading.Thread(target=self._run, daemon=True)
             self._thread.start()
 
@@ -121,6 +151,13 @@ class TradesSource(BaseSource):
             self.stop()
 
     def stop(self) -> None:
+        """
+        Close websocket connection and join threads when meet the stop condition.
+
+        Stops when:
+          - maximum time has occurred or
+          - maximum number of unique wallets founded
+        """
         self._running = False
         n_wallets = self.sink.n_wallets_founded()
         n_trades = self._n_trades
@@ -138,6 +175,9 @@ class TradesSource(BaseSource):
         print(f"[{self.name}] Searching efficiency: {n_wallets/(2*n_trades)*100} %")
 
     def _run(self) -> None:
+        """
+        Run websocket connection.
+        """
         while self._running:
             self._ws = websocket.WebSocketApp(
                 self.WS_URL,
@@ -153,6 +193,13 @@ class TradesSource(BaseSource):
                 time.sleep(self.reconnect_delay)
 
     def _stop_condition(self):
+        """
+        Checks the stop condition.
+
+        Stops when:
+          - maximum time has occurred or
+          - maximum number of unique wallets founded
+        """
         time_running = time.time() - self.start_time
         unique_wallets_found = self.sink.n_wallets_founded()
 
@@ -164,6 +211,11 @@ class TradesSource(BaseSource):
             self.stop()
 
     def _on_open(self, ws: websocket.WebSocketApp) -> None:
+        """
+        Open websocket connection and subscribe given markets (coins).
+
+        :param ws: WebSocketApp
+        """
         print(f"[{self.name}] Connected.")
 
         for market in self.markets:
@@ -178,6 +230,12 @@ class TradesSource(BaseSource):
             print(f"[{self.name}] Subscription for trade on: {market}")
 
     def _on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
+        """
+        Sending a message to WebSocketApp and handling a payload.
+
+        :param ws: WebSocketApp
+        :param message: websocket message
+        """
         try:
             payload = json.loads(message)
         except json.JSONDecodeError:
@@ -197,6 +255,13 @@ class TradesSource(BaseSource):
         self._stop_condition()
 
     def _handle_trade(self, trade: dict) -> None:
+        """
+        Handle a trade message.
+
+        Create TransactionRecords for buyer and seller, then add to unique wallet addresses to TransactionSink.
+
+        :param trade: transaction information (eq. wallet address, coin, time, position size)
+        """
         users = trade.get("users")
         if not isinstance(users, list) or len(users) != 2:
             return
@@ -235,13 +300,35 @@ class TradesSource(BaseSource):
         self._n_trades += 1
 
     def _on_error(self, ws: websocket.WebSocketApp, error: object) -> None:
+        """
+        Handle errors.
+
+        :param ws: WebSocketApp
+        :param error: an error occurred
+        """
         print(f"[{self.name}] Error: {error}")
 
     def _on_close(self, ws: websocket.WebSocketApp, close_status_code: object, close_msg: object) -> None:
+        """
+        On close.
+
+        :param ws: WebSocketApp
+        :param close_status_code: close status code
+        :param close_msg: close message
+        """
         print(f"[{self.name}] Disconnected. code={close_status_code} msg={close_msg}")
 
     @staticmethod
     def _to_float(value) -> Optional[float]:
+        """
+        Convert given value to float.
+
+        Return None if the value when TypeError or ValueError occurred.
+        Also return None when the value is None.
+
+        :param value: given value
+        :return: float | None
+        """
         try:
             if value is None:
                 return None
