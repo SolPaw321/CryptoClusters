@@ -1,20 +1,27 @@
 from src.addresses.finders import TradesSource, TransactionSink
 from src.google_drive.GoogleDriveHandler import GoogleDriveHandler
 import src.google_drive.folders_ids as gd_ids
-import src.paths.PATHS as loc_path
-from src.misc.csv.unique_rows import unique_rows
+import src.paths as loc_path
+from src.misc.csv import unique_rows
 
 
 if __name__ == "__main__":
+    UNIQUE_WALLETS_TEMP = loc_path.ADDRESSES_TEMP / "unique_wallets.csv"
+    UNIQUE_WALLETS = loc_path.ADDRESSES / "unique_wallets.csv"
+
     gd = GoogleDriveHandler()
+    if not UNIQUE_WALLETS.exists():
+        gd.download_folder(
+            google_drive_folder_id=gd_ids.ADDRESSES_FOLDER_ID,
+            local_folder_path=loc_path.ADDRESSES,
+            rewrite=False
+        )
     gd.download_folder(
         google_drive_folder_id=gd_ids.ADDRESSES_FOLDER_ID,
         local_folder_path=loc_path.ADDRESSES_TEMP,
-        rewrite=False
+        rewrite=True
     )
 
-    UNIQUE_WALLETS_TEMP = loc_path.ADDRESSES_TEMP / "unique_wallets.csv"
-    UNIQUE_WALLETS = loc_path.ADDRESSES / "unique_wallets.csv"
     unique_rows(
         UNIQUE_WALLETS,
         UNIQUE_WALLETS_TEMP,
@@ -31,8 +38,8 @@ if __name__ == "__main__":
     source = TradesSource(
         sink=sink,
         markets=["BTC", "ETH", "SOL"],
-        max_running_time=600.0,
-        max_wallets_found=1000
+        max_running_time=6000.0,
+        max_wallets_found=10000
     )
 
     source.start()
