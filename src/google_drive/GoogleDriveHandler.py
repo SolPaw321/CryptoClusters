@@ -1,5 +1,7 @@
 import os
 import pickle
+from typing import Optional
+
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -10,6 +12,11 @@ from src.google_drive.folders_ids import *
 
 
 class GoogleDriveHandler:
+    """
+    Google Drive Handler.
+
+    Tool for uploading and downloading files from/to Google Drive.
+    """
     def __init__(self):
         self.SCOPES = SCOPES
 
@@ -22,7 +29,11 @@ class GoogleDriveHandler:
         self.service = self.__authenticate()
 
 
-    def __authenticate(self):
+    def __authenticate(self) -> None:
+        """
+        Google Drive authentication.
+        Upon first authorization, a pickle file is generated.
+        """
         creds = None
         if os.path.exists(self.TOKEN):
             with open(self.TOKEN, "rb") as token:
@@ -43,7 +54,14 @@ class GoogleDriveHandler:
 
         return build("drive", "v3", credentials=creds)
 
-    def __find_folder(self, folder_name, parent_folder_id):
+    def __find_folder(self, folder_name: str, parent_folder_id: str) -> Optional[str]:
+        """
+        Find a folder on Google Drive.
+
+        :param folder_name: folder name
+        :param parent_folder_id: parent folder id
+        :return: found folder id (bytes) or None
+        """
         query = (
             "mimeType='application/vnd.google-apps.folder' "
             f"and name='{folder_name}' "
@@ -57,7 +75,15 @@ class GoogleDriveHandler:
         folders = results.get("files", [])
         return folders[0]["id"] if folders else None
 
-    def __create_or_get_folder(self, folder_name, parent_folder_id):
+    def __create_or_get_folder(self, folder_name:str, parent_folder_id: str) -> Optional[str]:
+        """
+        If given folder exists, then return its id.
+        If not, create a new folder and return its id.
+
+        :param folder_name: folder name
+        :param parent_folder_id: parent folder id
+        :return: created or got folder id (bytes), or None
+        """
         folder_id = self.__find_folder(folder_name, parent_folder_id)
 
         if folder_id:
@@ -76,7 +102,14 @@ class GoogleDriveHandler:
         print(f"New folder created '{folder_name}' on Google Drive.")
         return folder.get("id")
 
-    def __find_file(self, file_name, parent_folder_id):
+    def __find_file(self, file_name: str, parent_folder_id: str) -> Optional[str]:
+        """
+        Find a file on Google Drive.
+
+        :param file_name: file name to be found
+        :param parent_folder_id: parent folder id
+        :return: found file id (bytes) or None
+        """
         query = (
             f"name='{file_name}' "
             f"and '{parent_folder_id}' in parents "
@@ -89,7 +122,18 @@ class GoogleDriveHandler:
         files = results.get("files", [])
         return files[0]["id"] if files else None
 
-    def __upload_or_update_file(self, file_path, parent_folder_id, *, rewrite=True):
+    def __upload_or_update_file(self, file_path, parent_folder_id: str, *, rewrite: bool=True) -> None:
+        """
+        Upload or update a file.
+
+        If file exists and rewrite=True, then update file.
+        If file exists and rewrite=File, then skip upload on this file.
+        Otherwise, upload a new file.
+
+        :param file_path: local file path
+        :param parent_folder_id: parent folder id
+        :param rewrite: true or false
+        """
         file_name = os.path.basename(file_path)
         file_id = self.__find_file(file_name, parent_folder_id)
 
@@ -112,7 +156,12 @@ class GoogleDriveHandler:
                 fields="id"
             ).execute()
 
-    def __list_folder_items(self, folder_id):
+    def __list_folder_items(self, folder_id: str):
+        """
+        Returns list of files in given folder.
+
+        :param folder_id: folder id
+        """
         query = f"'{folder_id}' in parents and trashed = false"
         results = self.service.files().list(
             q=query,
@@ -121,7 +170,18 @@ class GoogleDriveHandler:
         ).execute()
         return results.get("files", [])
 
-    def __download_file(self, file_id, file_name, local_parent_path, *, rewrite=True):
+    def __download_file(self, file_id: str, file_name: str, local_parent_path: str, *, rewrite:bool=True) -> None:
+        """
+        Download a file from Google Drive.
+
+        If local file exists and rewrite=True, then rewrite local file.
+        If local file exists and rewrite=False, then skip downloading.
+
+        :param file_id: file id
+        :param file_name: file name
+        :param local_parent_path: local file path
+        :param rewrite: true or false
+        """
         os.makedirs(local_parent_path, exist_ok=True)
         local_file_path = os.path.join(local_parent_path, file_name)
 
@@ -145,7 +205,14 @@ class GoogleDriveHandler:
 
         print(f"Downloaded file: {local_file_path}")
 
-    def __download_folder_recursive(self, folder_id, local_current_path, *, rewrite=True):
+    def __download_folder_recursive(self, folder_id: str, local_current_path: str | Path, *, rewrite:bool=True) -> None:
+        """
+        Download all files in given folder recursively.
+
+        :param folder_id: folder id
+        :param local_current_path: local folder path
+        :param rewrite: true or false
+        """
         os.makedirs(local_current_path, exist_ok=True)
 
         items = self.__list_folder_items(folder_id)
@@ -171,7 +238,14 @@ class GoogleDriveHandler:
                     rewrite=rewrite
                 )
 
-    def upload_folder(self, *, google_drive_folder_id=None, local_folder_path=None, rewrite=True):
+    def upload_folder(self, *, google_drive_folder_id:str=None, local_folder_path:str|Path=None, rewrite:bool=True) -> None:
+        """
+        API for uploading a file form local to Google Drive.
+
+        :param google_drive_folder_id: folder id to upload
+        :param local_folder_path: uploading local folder
+        :param rewrite: true or false
+        """
         parent_folder_id = google_drive_folder_id or SINK_FOLDER_ID
 
         for root, dirs, files in os.walk(local_folder_path):
@@ -191,7 +265,14 @@ class GoogleDriveHandler:
                     rewrite=rewrite
                 )
 
-    def upload_file(self, local_file_path, *, google_drive_folder_id=None, rewrite=True):
+    def upload_file(self, local_file_path:str, *, google_drive_folder_id:str=None, rewrite:bool=True) -> None:
+        """
+        Upload a single file from local to Google Drive.
+
+        :param local_file_path: local file path
+        :param google_drive_folder_id: folder id to upload
+        :param rewrite: true or false
+        """
         parent_folder_id = google_drive_folder_id or SINK_FOLDER_ID
 
         if not os.path.isfile(local_file_path):
@@ -205,7 +286,14 @@ class GoogleDriveHandler:
             rewrite=rewrite
         )
 
-    def download_folder(self, *, google_drive_folder_id=None, local_folder_path=None, rewrite=True):
+    def download_folder(self, *, google_drive_folder_id:str=None, local_folder_path:str=None, rewrite:bool=True) -> None:
+        """
+        Download a folder from Google Drive to local.
+
+        :param google_drive_folder_id: folder id
+        :param local_folder_path: local folder path
+        :param rewrite: true or false
+        """
         folder_id = google_drive_folder_id or SINK_FOLDER_ID
         self.__download_folder_recursive(
             folder_id,
@@ -213,7 +301,15 @@ class GoogleDriveHandler:
             rewrite=rewrite
         )
 
-    def download_file(self, file_name, *, local_folder_path=None, google_drive_folder_id=None, rewrite=True):
+    def download_file(self, file_name:str, *, local_folder_path:str=None, google_drive_folder_id:str=None, rewrite:bool=True) -> None:
+        """
+        Download a single file from Google Drive to local.
+
+        :param file_name: file name
+        :param local_folder_path: local file path
+        :param google_drive_folder_id: folder id
+        :param rewrite: true or false
+        """
         parent_folder_id = google_drive_folder_id or CRYPTO_CLUSTERS_FOLDER_ID
         local_folder_path = local_folder_path or "."
 
