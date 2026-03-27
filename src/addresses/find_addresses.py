@@ -31,12 +31,11 @@ if __name__ == "__main__":
     source = TradesSource(
         sink=sink,
         markets=["BTC", "ETH", "SOL"],
-    )
-
-    source.start(
-        max_running_time=60, # seconds
+        max_running_time=600.0,
         max_wallets_found=1000
     )
+
+    source.start()
 
     unique_rows(
         UNIQUE_WALLETS,

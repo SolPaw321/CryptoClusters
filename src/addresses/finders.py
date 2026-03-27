@@ -4,13 +4,14 @@ import sys
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Optional, Iterable
+from typing import Optional, Iterable, TypeVar, Type
 import csv
 import json
 import threading
 import time
 import websocket
 
+T = TypeVar("T")
 
 @dataclass
 class TransactionRecord:
@@ -104,81 +105,170 @@ class TradesSource(BaseSource):
     WS_URL = "wss://api.hyperliquid.xyz/ws"
 
     def __init__(
-        self,
-        sink: TransactionSink,
-        markets: Iterable[str],
-        reconnect_delay: float = 5.0,
-    ) -> None:
+            self,
+            sink: TransactionSink,
+            markets: Iterable[str],
+            max_retries: int = 5,
+            base_delay: float = 3.0,
+            ping_interval: float = 20.0,
+            ping_timeout: float = 10.0,
+            max_delay: float = 30.0,
+            max_running_time: float = 60.0, # seconds
+            max_wallets_found: int = 1000) -> None:
         super().__init__(name="trades", sink=sink)
         self.markets = list(markets)
-        self.reconnect_delay = reconnect_delay
+
+        self.max_retries = self.__validate_inputs(max_retries, int, 5)
+        self.base_delay = self.__validate_inputs(base_delay, float, 3.0)
+        self.ping_interval = self.__validate_inputs(ping_interval, float, 20.0)
+        self.ping_timeout = self.__validate_inputs(ping_timeout, float, 10.0)
+        self.max_delay = self.__validate_inputs(max_delay, float, 30.0)
 
         self._ws: Optional[websocket.WebSocketApp] = None
         self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
         self._running = False
-        self.start_time = time.time()
+        self._finalized = False
+        self._stop_reason: Optional[str] = None
+        self.current_retry = 0
+
+        self.start_time = 0
         self._n_trades = 0
 
-        self.max_running_time = 60 # 1 minute
-        self.max_wallets_found = 1000
+        self.max_running_time = self.__validate_inputs(max_running_time, float, 60.0)
+        self.max_wallets_found = self.__validate_inputs(max_wallets_found, int, 1000)
 
-    def start(self, *, max_running_time=None, max_wallets_found=None) -> None:
+    @staticmethod
+    def __validate_inputs(input_value, expected_type: Type[T], default_value: T, minimum_value: T = 0) -> T:
         """
-        On start connection.
+        Validate input value.
 
-        Run a connection on a separate thread.
+        :param input_value: input value
+        :param expected_type: expected type of input value
+        :param default_value: default value
+        :return: input_value if type(input_value)==expected_type, default_value otherwise
+        """
+        if type(input_value) == expected_type and input_value > minimum_value:
+            return input_value
+        return default_value
 
-        :param max_running_time: maximum running time in seconds
-        :param max_wallets_found: maximum number of unique wallets addresses to found
+    def start(self) -> None:
+        """
+        Start websocket connection in a separate thread.
+        This method blocks until the worker thread finishes.
         """
         if self._running:
             return
-        self._running = True
 
-        if max_running_time is not None and type(max_running_time)==int:
-            self.max_running_time = max_running_time
-        if max_wallets_found is not None and type(max_wallets_found)==int:
-            self.max_wallets_found = max_wallets_found
+        self._running = True
+        self._finalized = False
+        self._stop_reason = None
+        self.current_retry = 0
+        self.start_time = time.time()
+        self._n_trades = 0
+        self._stop_event.clear()
+
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
         try:
-            self._thread = threading.Thread(target=self._run, daemon=True)
-            self._thread.start()
-
-            while self._running:
-                time.sleep(1)
+            while self._thread.is_alive():
+                self._thread.join(timeout=0.5)
         except KeyboardInterrupt:
-            print(f"[{self.name}] KeyboardInterrupt. Stoping...")
-            self.stop()
+            self._request_stop("KeyboardInterrupt")
+        finally:
+            self._join_thread(timeout=5.0)
+            self._finalize()
 
-    def stop(self) -> None:
+    def stop(self, stop_msg: Optional[str] = None) -> None:
         """
-        Close websocket connection and join threads when meet the stop condition.
+        Public stop method.
+        Can be called manually from outside the class.
 
-        Stops when:
-          - maximum time has occurred or
-          - maximum number of unique wallets founded
+        :param stop_msg: stopping message
         """
+        self._request_stop(stop_msg)
+        self._join_thread(timeout=5.0)
+        self._finalize()
+
+    def _request_stop(self, reason: Optional[str] = None) -> None:
+        """
+        Internal stop request.
+        Safe to call multiple times and safe from websocket callbacks.
+
+        :param reason: stopping reason
+        """
+        if reason and self._stop_reason is None:
+            self._stop_reason = reason
+
         self._running = False
+        self._stop_event.set()
+
+        ws = self._ws
+        self._ws = None
+
+        if ws is not None:
+            try:
+                print(f"[{self.name}] Closing WebSocketApp...")
+                ws.close()
+                print(f"[{self.name}] WebSocketApp closed.")
+            except Exception as e:
+                print(f"[{self.name}] Error while closing WebSocketApp: {e}")
+
+    def _join_thread(self, timeout: float = 5.0) -> None:
+        """
+        Join worker thread if possible.
+
+        :param timeout: thread joining timeout
+        """
+        if self._thread is None:
+            return
+
+        if threading.current_thread() is self._thread:
+            return
+
+        if self._thread.is_alive():
+            print(f"[{self.name}] Joining thread...")
+            self._thread.join(timeout=timeout)
+
+            if self._thread.is_alive():
+                print(f"[{self.name}] Thread is still alive after {timeout} seconds.")
+            else:
+                print(f"[{self.name}] Thread joined.")
+
+    def _finalize(self) -> None:
+        """
+        Final summary and CSV save.
+        Executed only once.
+        """
+        if self._finalized:
+            return
+
+        self._finalized = True
+
         n_wallets = self.sink.n_wallets_founded()
         n_trades = self._n_trades
 
-        if self._ws is not None:
-            self._ws.close()
-
-        if self._thread is not None and self._thread.is_alive():
-            self._thread.join(timeout=2)
-
         self.sink.save_to_csv()
+
+        if self._stop_reason:
+            print(f"[{self.name}] Stop reason: {self._stop_reason}")
 
         print(f"[{self.name}] Intercepted transactions: {n_trades}")
         print(f"[{self.name}] Unique wallets found: {n_wallets}")
-        print(f"[{self.name}] Searching efficiency: {n_wallets/(2*n_trades)*100} %")
+
+        if n_trades > 0:
+            efficiency = n_wallets / (2 * n_trades) * 100
+            print(f"[{self.name}] Searching efficiency: {efficiency:.2f} %")
+        else:
+            print(f"[{self.name}] Searching efficiency: 0.00 %")
 
     def _run(self) -> None:
         """
-        Run websocket connection.
+        Run websocket connection with reconnect attempts.
         """
-        while self._running:
+        while not self._stop_event.is_set():
             self._ws = websocket.WebSocketApp(
                 self.WS_URL,
                 on_open=self._on_open,
@@ -187,36 +277,72 @@ class TradesSource(BaseSource):
                 on_close=self._on_close,
             )
 
-            self._ws.run_forever()
+            try:
+                self._ws.run_forever(
+                    ping_interval=self.ping_interval,
+                    ping_timeout=self.ping_timeout,
+                )
+            except Exception as e:
+                print(f"[{self.name}] run_forever exception: {e}")
+            finally:
+                self._ws = None
 
-            if self._running:
-                time.sleep(self.reconnect_delay)
+            if self._stop_event.is_set():
+                break
 
-    def _stop_condition(self):
+            self.current_retry += 1
+
+            if self.current_retry > self.max_retries:
+                self._request_stop(
+                    f"Maximum reconnect attempts exceeded ({self.max_retries})."
+                )
+                break
+
+            delay = min(self.base_delay * (2 ** (self.current_retry - 1)), self.max_delay)
+
+            print(
+                f"[{self.name}] Reconnecting attempt "
+                f"{self.current_retry}/{self.max_retries} in {delay} s..."
+            )
+
+            if self._stop_event.wait(delay):
+                break
+
+    def _stop_condition(self) -> None:
         """
         Checks the stop condition.
 
         Stops when:
           - maximum time has occurred or
-          - maximum number of unique wallets founded
+          - maximum number of unique wallets was found
         """
         time_running = time.time() - self.start_time
         unique_wallets_found = self.sink.n_wallets_founded()
 
         if time_running >= self.max_running_time:
-            print(f"[{self.name}] Maximum running time achieved.")
-            self.stop()
+            self._request_stop(
+                f"Maximum running time achieved. "
+                f"Running time: {time_running:.2f} s, "
+                f"Max running time: {self.max_running_time:.2f} s."
+            )
         elif unique_wallets_found >= self.max_wallets_found:
-            print(f"[{self.name}] Maximum number of wallets founded.")
-            self.stop()
+            self._request_stop(
+                f"Maximum number of wallets found. "
+                f"Unique wallets found: {unique_wallets_found}, "
+                f"Max unique wallets: {self.max_wallets_found}."
+            )
 
     def _on_open(self, ws: websocket.WebSocketApp) -> None:
         """
-        Open websocket connection and subscribe given markets (coins).
+        Open websocket connection and subscribe given markets.
 
         :param ws: WebSocketApp
         """
+        if self._stop_event.is_set():
+            return
+
         print(f"[{self.name}] Connected.")
+        self.current_retry = 0
 
         for market in self.markets:
             msg = {
@@ -226,16 +352,23 @@ class TradesSource(BaseSource):
                     "coin": market,
                 },
             }
-            ws.send(json.dumps(msg))
-            print(f"[{self.name}] Subscription for trade on: {market}")
+
+            try:
+                ws.send(json.dumps(msg))
+                print(f"[{self.name}] Subscription for trade on: {market}")
+            except Exception as e:
+                print(f"[{self.name}] Subscription error for {market}: {e}")
 
     def _on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
         """
-        Sending a message to WebSocketApp and handling a payload.
+        Handle websocket message.
 
         :param ws: WebSocketApp
-        :param message: websocket message
+        :param message: message
         """
+        if self._stop_event.is_set():
+            return
+
         try:
             payload = json.loads(message)
         except json.JSONDecodeError:
