@@ -11,6 +11,21 @@ def unique_rows(
         ascending: bool = True,
         name: str = "",
         files_to_delete: list[str | Path] = None) -> None:
+    """
+    Read csv files, contact, remove duplicates and sort them.
+
+    The :param main_file: gives column order.
+
+    :param main_file: the main file path (gives column order),
+    :param side_files: side files paths,
+    :param unique_column: to drop duplicates (main file must contain),
+    :param output_file: output file path
+    :param sort_column: sort by a column
+    :param ascending: true or false
+    :param name: extra name for print/logging communicates
+    :param files_to_delete: files to delete after contact; if the output file is the same as main file, then it will not be deleted
+    :return: None
+    """
     valid_files_lengths = []
     extra = f"[{name}] " if name != "" else ""
 
