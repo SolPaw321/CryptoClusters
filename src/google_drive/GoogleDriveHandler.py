@@ -15,6 +15,7 @@ class GoogleDriveHandler:
 
         __GOOGLE_DRIVE = Path(__file__).resolve().parent
         __GOOGLE_DRIVE_SECRETS = __GOOGLE_DRIVE / "secrets"
+        __GOOGLE_DRIVE.mkdir(parents=True, exist_ok=True)
         self.TOKEN = os.path.join(__GOOGLE_DRIVE_SECRETS, "token.pickle")
         self.CLIENT_SECRETS = os.path.join(__GOOGLE_DRIVE_SECRETS, "client_secrets.json")
 
