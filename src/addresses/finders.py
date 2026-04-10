@@ -31,8 +31,10 @@ class TransactionRecord:
 class TransactionSink:
     COL_ORDER = ["address", "source", "discovered", "coin", "side", "timestamp", "size"]
 
-    def __init__(self, csv_path: str) -> None:
+    def __init__(self, csv_path: str, batch_size: int) -> None:
         self.csv_path = csv_path
+        self.batch_size = batch_size
+        self.batches_saved = 0
         self._seen_addresses: set[str] = set()
         self._collected_wallets: list = list()
         self._lock = threading.Lock()
@@ -61,6 +63,11 @@ class TransactionSink:
 
         self._seen_addresses.add(record.address)
         self._collected_wallets.append(asdict(record))
+
+        if len(self._collected_wallets) >= self.batch_size:
+            self.batches_saved += 1
+            self.save_to_csv()
+
         return True
 
     def save_to_csv(self):
@@ -72,7 +79,7 @@ class TransactionSink:
             writer.writerows(self._collected_wallets)
 
         self._collected_wallets = list()
-        self._seen_addresses = set()
+        # self._seen_addresses = set()
 
     def n_wallets_founded(self) -> int:
         """
@@ -257,6 +264,7 @@ class TradesSource(BaseSource):
 
         print(f"[{self.name}] Intercepted transactions: {n_trades}")
         print(f"[{self.name}] Unique wallets found: {n_wallets}")
+        print(f"[{self.name}] Number of batches saved: {self.sink.batches_saved}")
 
         if n_trades > 0:
             efficiency = n_wallets / (2 * n_trades) * 100
