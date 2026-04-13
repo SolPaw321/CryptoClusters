@@ -29,12 +29,30 @@ def unique_rows(
     valid_files_lengths = []
     extra = f"[{name}] " if name != "" else ""
 
-    main_file = Path(main_file)
+    main_file_path = Path(main_file)
+    if not main_file_path.exists():
+        raise FileNotFoundError(f"Main file {main_file} not exists.")
 
     if type(side_files) == list:
-        side_files = [Path(f) for f in side_files]
+        side_file_paths = set()
+        for f in side_files:
+            file = Path(f)
+            if not file.exists():
+                print(f"{extra}Side file {file} not exists. Skipping.")
+            else:
+                side_file_paths.add(file)
     else:
-        side_files = [side_files]
+        file = Path(side_files)
+        if not file.exists():
+            print(f"{extra}Side file {file} not exists. Skipping.")
+        side_file_paths = {file}
+
+    if main_file_path in side_file_paths:
+        side_file_paths.difference_update({main_file_path})
+        if not len(side_file_paths):
+            raise ValueError(f"{extra}Lack of side files.")
+        print(f"{extra}Main file deleted from side files.")
+
 
     df_main = pd.read_csv(main_file)
     main_columns = list(df_main.columns)
@@ -42,13 +60,12 @@ def unique_rows(
     valid_dfs = [df_main]
     valid_files_lengths.append(len(df_main))
 
-    for file in side_files:
+    for file in side_file_paths:
         df = pd.read_csv(file)
 
         if list(df.columns) == main_columns:
             valid_dfs.append(df)
             valid_files_lengths.append(len(df))
-            print(f"{df.columns=}")
         else:
             print(f"{extra}File {file} has not valid columns.")
 
