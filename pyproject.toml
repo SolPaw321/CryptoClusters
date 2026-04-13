@@ -8,6 +8,7 @@ authors = [
     {name = "Lukas Chmarzynski",email = ""},
     {name = "Robert Dubiela",email = ""},
     {name = "Martyna Kwiatkowska",email = ""},
+    {name = "Darek Kuczynski", email = ""}
 ]
 readme = "README.md"
 requires-python = ">=3.13"
@@ -16,7 +17,6 @@ dependencies = [
     "google-auth",
     "google-auth-httplib2",
     "google-auth-oauthlib",
-    "websocket",
     "websocket-client",
     "pandas",
     "numpy",
