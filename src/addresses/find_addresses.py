@@ -33,7 +33,7 @@ if __name__ == "__main__":
 
     trade_wallets_temp = loc_path.ADDRESSES_TEMP / "trade_wallets_temp.csv"
 
-    sink = TransactionSink(csv_path=trade_wallets_temp)
+    sink = TransactionSink(csv_path=trade_wallets_temp, batch_size=1000)
 
     source = TradesSource(
         sink=sink,
