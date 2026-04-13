@@ -1,1 +1,3 @@
-from .PATHS import *
+from .paths import Paths
+
+PATHS = Paths()
