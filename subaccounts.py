@@ -1,14 +1,16 @@
+import os
 import pandas as pd
 import requests
 import time
 import csv
+import psycopg
 from pathlib import Path
 from typing import List, Dict, Any, Set
+from dotenv import load_dotenv
 
 from src.paths import PATHS
 
 # --- PATH CONFIGURATION ---
-INPUT_CSV = PATHS.ADDRESSES / "unique_wallets.csv"
 OUTPUT_CSV = PATHS.ADDRESSES / "only_subaccounts.csv"
 SCANNED_CACHE_FILE = PATHS.ADDRESSES_TEMP / "scanned_masters.txt"
 
@@ -22,6 +24,17 @@ WEIGHT_SUBACCOUNTS = 20
 
 SLEEP_USER_ROLE = (WEIGHT_USER_ROLE / WEIGHT_PER_SEC) + 0.1    
 SLEEP_SUBACCOUNTS = (WEIGHT_SUBACCOUNTS / WEIGHT_PER_SEC) + 0.1 
+
+# --- DB CONFIGURATION ---
+load_dotenv(dotenv_path=PATHS.ENV)
+
+DB_CONFIG = {
+    "dbname": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "host": os.getenv("DB_HOST", "127.0.0.1"),
+    "port": int(os.getenv("DB_PORT", 5432))
+}
 
 def safe_api_request(payload: dict) -> Any:
     attempt = 0
@@ -93,113 +106,195 @@ def append_to_cache(file_path: Path, addresses: List[str]) -> None:
         for address in addresses:
             f.write(f"{address}\n")
 
+def fetch_pending_batch(conn, batch_size: int) -> List[str]:
+    """Fetch batch addresses and change their status to PROCESSING."""
+    query = """
+        UPDATE wallet_processing_queue
+        SET status = 'PROCESSING'
+        WHERE wallet_address IN (
+            SELECT wallet_address
+            FROM wallet_processing_queue
+            WHERE status = 'PENDING'
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING wallet_address;
+    """
+    with conn.cursor() as cur:
+        cur.execute(query, (batch_size,))
+        addresses = [row[0] for row in cur.fetchall()]
+    
+    conn.commit()
+    return addresses
+
+def mark_batch_as_done(conn, addresses: List[str]) -> None:
+    """Changes processed adresses status to DONE."""
+    if not addresses:
+        return
+    query = """
+        UPDATE wallet_processing_queue
+        SET status = 'DONE'
+        WHERE wallet_address = %s;
+    """
+    with conn.cursor() as cur:
+        cur.executemany(query, [(addr,) for addr in addresses])
+
+def revert_batch_to_pending(conn, addresses: List[str]) -> None:
+    """Reverts status of unprocessed adresses from PROCESSING to PENDING."""
+    if not addresses:
+        return
+    query = """
+        UPDATE wallet_processing_queue
+        SET status = 'PENDING'
+        WHERE wallet_address = %s;
+    """
+    with conn.cursor() as cur:
+        cur.executemany(query, [(addr,) for addr in addresses])
+
 def main() -> None:
     print(f"[*] --- CONFIGURATION ---")
-    print(f"[*] Input:  {INPUT_CSV}")
-    print(f"[*] Output: {OUTPUT_CSV}")
-    print(f"[*] Cache:  {SCANNED_CACHE_FILE}")
-    print(f"[*] ---------------------------")
-
-    if not INPUT_CSV.exists():
-        print(f"Error: Input file {INPUT_CSV} does not exist!")
-        return
-
-    try:
-        df_input = pd.read_csv(INPUT_CSV)
-        if 'address' not in df_input.columns:
-            print("Error: Input file must contain an 'address' column.")
-            return
-        all_addresses = df_input['address'].dropna().unique().tolist()
-    except Exception as e:
-        print(f"Error reading CSV file: {e}")
-        return
+    print(f"[*] Output CSV Backup: {OUTPUT_CSV}")
+    print(f"[*] Cache TXT Backup:  {SCANNED_CACHE_FILE}")
+    print(f"[*] Connecting to DB:  '{DB_CONFIG['dbname']}'...")
+    print(f"[*] ---------------------------\n")
 
     scanned_history = load_scanned_masters()
     existing_subaccounts = load_existing_subaccounts()
-    
-    pending_addresses = [
-        addr for addr in all_addresses 
-        if addr not in scanned_history and addr not in existing_subaccounts
-    ]
 
-    if not pending_addresses:
-        print("\n[*] Everything is already up to date. No new addresses to scan.")
-        return
+    with psycopg.connect(**DB_CONFIG) as conn:
+        print("[*] Connected to DB. Starting worker...\n")
+        new_count = 0
 
-    print(f"[*] Starting loop. Pending: {len(pending_addresses)}")
-    print(f"[*] ---------------------------\n")
-    
-    accounts_batch = []
-    scanned_batch = []
-    new_count = 0
+        try:
+            while True:
+                batch_addresses = fetch_pending_batch(conn, BATCH_SIZE)
+                
+                if not batch_addresses:
+                    print("\n[*] No PENDING adresses in database.")
+                    break
+                
+                print(f"\n[!] Reserved {len(batch_addresses)} adresses. Status changed to PROCESSING.")
+                
+                accounts_batch = []   
+                scanned_batch = []    
+                db_masters_batch = []    
+                db_subs_batch = []       
 
-    for i, address in enumerate(pending_addresses, 1):
-        subs = fetch_subaccounts(address)
-        time.sleep(SLEEP_SUBACCOUNTS) 
+                for i, address in enumerate(batch_addresses, 1):
+                    subs = fetch_subaccounts(address)
+                    time.sleep(SLEEP_SUBACCOUNTS) 
 
-        if subs:
-            master = address
-            new_in_this_round = 0
+                    if subs:
+                        master = address
+                        db_masters_batch.append((master,))
+                        new_in_this_round = 0
+                        
+                        for sub in subs:
+                            sub_addr = sub.get("subAccountUser")
+                            if sub_addr and sub_addr not in existing_subaccounts:
+                                sub_name = sub.get("name", "Unnamed")
+                                
+                                accounts_batch.append({
+                                    "master_address": master,
+                                    "subaccount_address": sub_addr,
+                                    "discovered_at": pd.Timestamp.now(tz='UTC').isoformat(),
+                                    "subaccount_name": sub_name
+                                })
+                                db_subs_batch.append((sub_addr, master, sub_name))
+                                existing_subaccounts.add(sub_addr)
+                                new_in_this_round += 1
+                        
+                        scanned_batch.append(address)
+                        print(f"[{i}/{len(batch_addresses)}] [MASTER] {master} -> Found {new_in_this_round} new subaccounts.")
+
+                    else:
+                        real_master = fetch_master_address(address)
+                        time.sleep(SLEEP_USER_ROLE)
+                        
+                        scanned_batch.append(address)
+                        db_masters_batch.append((address,)) 
+
+                        if real_master != address:
+                            if real_master not in scanned_history and real_master not in scanned_batch:
+                                master_subs = fetch_subaccounts(real_master)
+                                time.sleep(SLEEP_SUBACCOUNTS)
+                                
+                                db_masters_batch.append((real_master,))
+                                new_in_this_round = 0
+                                
+                                for sub in master_subs:
+                                    sub_addr = sub.get("subAccountUser")
+                                    if sub_addr and sub_addr not in existing_subaccounts:
+                                        sub_name = sub.get("name", "Unnamed")
+                                        
+                                        accounts_batch.append({
+                                            "master_address": real_master,
+                                            "subaccount_address": sub_addr,
+                                            "discovered_at": pd.Timestamp.now(tz='UTC').isoformat(),
+                                            "subaccount_name": sub_name
+                                        })
+                                        db_subs_batch.append((sub_addr, real_master, sub_name))
+                                        existing_subaccounts.add(sub_addr)
+                                        new_in_this_round += 1
+                                
+                                scanned_batch.append(real_master)
+                                print(f"[{i}/{len(batch_addresses)}] [SUBACCOUNT] Resolved {address[:8]}... -> Discovered New Master: {real_master} -> Found {new_in_this_round} new subaccounts.")
+                        else:
+                            print(f"[{i}/{len(batch_addresses)}] [LONELY MASTER] {address} -> Found 0 subaccounts.")
+
+                append_to_csv(OUTPUT_CSV, accounts_batch)
+                append_to_cache(SCANNED_CACHE_FILE, scanned_batch)
+                scanned_history.update(scanned_batch)
+                
+                with conn.cursor() as cur:
+                    if db_masters_batch:
+                        cur.executemany("""
+                            INSERT INTO wallets (address)
+                            VALUES (%s)
+                            ON CONFLICT (address) DO NOTHING;
+                        """, db_masters_batch)
+                    
+                    if db_subs_batch:
+                        cur.executemany("""
+                            INSERT INTO wallets (address, master_address, subaccount_name)
+                            VALUES (%s, %s, %s)
+                            ON CONFLICT (address) DO UPDATE SET
+                                master_address = EXCLUDED.master_address,
+                                subaccount_name = EXCLUDED.subaccount_name;
+                        """, db_subs_batch)
+
+                mark_batch_as_done(conn, batch_addresses)
+                
+                conn.commit()
+                new_count += len(accounts_batch)
+                print(f"[+] Successfully flushed data from {len(batch_addresses)} addresses to files and DB.")
+
+        except KeyboardInterrupt:
+            print("\n[!] Program interrupted manually.")
+            print("[!] Performing shutdown and DB rollback...")
             
-            for sub in subs:
-                sub_addr = sub.get("subAccountUser")
-                if sub_addr and sub_addr not in existing_subaccounts:
-                    accounts_batch.append({
-                        "master_address": master,
-                        "subaccount_address": sub_addr,
-                        "discovered_at": pd.Timestamp.now(tz='UTC').isoformat(),
-                        "subaccount_name": sub.get("name", "Unnamed")
-                    })
-                    existing_subaccounts.add(sub_addr)
-                    new_in_this_round += 1
+            processed_addresses = scanned_batch 
+            unprocessed_addresses = [addr for addr in batch_addresses if addr not in scanned_batch]
             
-            scanned_batch.append(address)
-            
-            print(f"[{i}/{len(pending_addresses)}] [MASTER] {master} -> Found {new_in_this_round} new subaccounts.")
-
-        else:
-            real_master = fetch_master_address(address)
-            time.sleep(SLEEP_USER_ROLE)
-            scanned_batch.append(address)
-
-            if real_master != address:
-                if real_master not in scanned_history and real_master not in scanned_batch:
-                    master_subs = fetch_subaccounts(real_master)
-                    time.sleep(SLEEP_SUBACCOUNTS)
-                    
-                    new_in_this_round = 0
-                    
-                    for sub in master_subs:
-                        sub_addr = sub.get("subAccountUser")
-                        if sub_addr and sub_addr not in existing_subaccounts:
-                            accounts_batch.append({
-                                "master_address": real_master,
-                                "subaccount_address": sub_addr,
-                                "discovered_at": pd.Timestamp.now(tz='UTC').isoformat(),
-                                "subaccount_name": sub.get("name", "Unnamed")
-                            })
-                            existing_subaccounts.add(sub_addr)
-                            new_in_this_round += 1
-                    
-                    scanned_batch.append(real_master)
-                    
-                    print(f"[{i}/{len(pending_addresses)}] [SUBACCOUNT] Resolved {address[:8]}... -> Discovered New Master: {real_master} -> Found {new_in_this_round} new subaccounts.")
-                else:
-                    print(f"[{i}/{len(pending_addresses)}] [SUBACCOUNT] Resolved {address[:8]}... -> Master {real_master} already scanned.")
-            else:
-                print(f"[{i}/{len(pending_addresses)}] [LONELY MASTER] {address} -> Found 0 subaccounts.")
-        
-        if len(scanned_batch) >= BATCH_SIZE or i == len(pending_addresses):
             append_to_csv(OUTPUT_CSV, accounts_batch)
             append_to_cache(SCANNED_CACHE_FILE, scanned_batch)
+            scanned_history.update(scanned_batch)
             
-            scanned_history.update(scanned_batch) 
-            new_count += len(accounts_batch)
-            
-            accounts_batch.clear()
-            scanned_batch.clear()
+            with conn.cursor() as cur:
+                if db_masters_batch:
+                    cur.executemany("INSERT INTO wallets (address) VALUES (%s) ON CONFLICT DO NOTHING;", db_masters_batch)
+                if db_subs_batch:
+                    cur.executemany("INSERT INTO wallets (address, master_address, subaccount_name) VALUES (%s, %s, %s) ON CONFLICT (address) DO UPDATE SET master_address = EXCLUDED.master_address, subaccount_name = EXCLUDED.subaccount_name;", db_subs_batch)
 
-    print(f"\n[+] Done. Added a total of {new_count} new entries to {OUTPUT_CSV.name}")
+            mark_batch_as_done(conn, processed_addresses)
+            revert_batch_to_pending(conn, unprocessed_addresses)
+            
+            conn.commit()
+            
+            new_count += len(accounts_batch)
+            print(f"[+] Saved {len(processed_addresses)} processed addresses. Reverted {len(unprocessed_addresses)} addresses back to PENDING.")
+
+        print(f"\n[+] Session finished. A total of {new_count} new subaccounts were added in this session.")
 
 if __name__ == "__main__":
     main()
