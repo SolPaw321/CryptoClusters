@@ -37,6 +37,7 @@ DB_CONFIG = {
 }
 
 def safe_api_request(payload: dict) -> Any:
+    """Handles API requests with built-in rate limit backups and connection retries."""
     attempt = 0
     while True:
         try:
@@ -107,10 +108,15 @@ def append_to_cache(file_path: Path, addresses: List[str]) -> None:
             f.write(f"{address}\n")
 
 def fetch_pending_batch(conn, batch_size: int) -> List[str]:
-    """Fetch batch addresses and change their status to PROCESSING."""
+    """
+    Fetch batch addresses, change their status to PROCESSING, 
+    and set started_at timestamp.
+    """
     query = """
         UPDATE wallet_processing_queue
-        SET status = 'PROCESSING'
+        SET status = 'PROCESSING',
+            started_at = NOW(),
+            completed_at = NULL
         WHERE wallet_address IN (
             SELECT wallet_address
             FROM wallet_processing_queue
@@ -128,24 +134,33 @@ def fetch_pending_batch(conn, batch_size: int) -> List[str]:
     return addresses
 
 def mark_batch_as_done(conn, addresses: List[str]) -> None:
-    """Changes processed adresses status to DONE."""
+    """
+    Changes processed addresses status to DONE 
+    and updates completed_at with the completion timestamp.
+    """
     if not addresses:
         return
     query = """
         UPDATE wallet_processing_queue
-        SET status = 'DONE'
+        SET status = 'DONE',
+            completed_at = NOW()
         WHERE wallet_address = %s;
     """
     with conn.cursor() as cur:
         cur.executemany(query, [(addr,) for addr in addresses])
 
 def revert_batch_to_pending(conn, addresses: List[str]) -> None:
-    """Reverts status of unprocessed adresses from PROCESSING to PENDING."""
+    """
+    Reverts status of unprocessed addresses from PROCESSING to PENDING 
+    and clears timestamps for clean retry.
+    """
     if not addresses:
         return
     query = """
         UPDATE wallet_processing_queue
-        SET status = 'PENDING'
+        SET status = 'PENDING',
+            started_at = NULL,
+            completed_at = NULL
         WHERE wallet_address = %s;
     """
     with conn.cursor() as cur:
@@ -170,10 +185,10 @@ def main() -> None:
                 batch_addresses = fetch_pending_batch(conn, BATCH_SIZE)
                 
                 if not batch_addresses:
-                    print("\n[*] No PENDING adresses in database.")
+                    print("\n[*] No PENDING addresses in database.")
                     break
                 
-                print(f"\n[!] Reserved {len(batch_addresses)} adresses. Status changed to PROCESSING.")
+                print(f"\n[!] Reserved {len(batch_addresses)} addresses. Status changed to PROCESSING.")
                 
                 accounts_batch = []   
                 scanned_batch = []    
@@ -181,6 +196,11 @@ def main() -> None:
                 db_subs_batch = []       
 
                 for i, address in enumerate(batch_addresses, 1):
+                    if address in existing_subaccounts or address in scanned_history:
+                        print(f"[{i}/{len(batch_addresses)}] [SKIPPED] {address[:8]}... -> Known address found in cache. Skipping request.")
+                        scanned_batch.append(address)
+                        continue
+
                     subs = fetch_subaccounts(address)
                     time.sleep(SLEEP_SUBACCOUNTS) 
 

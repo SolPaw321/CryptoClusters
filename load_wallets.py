@@ -16,6 +16,7 @@ DB_CONFIG = {
 }
 
 def load_unique_wallets(conn, filepath):
+    """Loads unique wallets from CSV into the main wallets table."""
     with open(filepath, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         data = [(row['address'], row['source']) for row in reader]
@@ -28,8 +29,10 @@ def load_unique_wallets(conn, filepath):
     with conn.cursor() as cur:
         cur.executemany(query, data)
     conn.commit()
+    print(f"[*] Loaded file: {filepath.name}")
 
 def load_subaccounts(conn, filepath):
+    """Loads subaccounts and their master relationships from CSV."""
     with open(filepath, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         masters = []
@@ -60,8 +63,10 @@ def load_subaccounts(conn, filepath):
         cur.executemany(master_query, masters)
         cur.executemany(sub_query, subs)
     conn.commit()
+    print(f"[*] Loaded file: {filepath.name} (Subaccounts: {len(subs)})")
 
 def populate_queue(conn):
+    """Populates the processing queue with all distinct addresses from the wallets table."""
     query = """
         INSERT INTO wallet_processing_queue (wallet_address)
         SELECT address FROM wallets
@@ -70,30 +75,53 @@ def populate_queue(conn):
     with conn.cursor() as cur:
         cur.execute(query)
     conn.commit()
+    print("[*] Inserted new addresses from the main table into the processing queue.")
 
 def mark_scanned_masters_as_done(conn, filepath):
-    """Zmienia status na 'DONE' dla adresów obecnych w pliku tekstowym."""
+    """Updates status to 'DONE' for addresses already present in the scanned masters text file."""
     if not os.path.exists(filepath):
-        print(f"Plik {filepath} nie istnieje. Pomijam aktualizację statusów.")
+        print(f"[-] File {filepath} does not exist. Skipping status update.")
         return
 
     with open(filepath, mode='r', encoding='utf-8') as f:
         scanned_addresses = [(line.strip(),) for line in f if line.strip()]
 
     if not scanned_addresses:
-        print("Plik scanned_masters.txt jest pusty.")
+        print("[-] The scanned_masters.txt file is empty.")
         return
 
     query = """
         UPDATE wallet_processing_queue
-        SET status = 'DONE'
+        SET status = 'DONE',
+            completed_at = NOW()
         WHERE wallet_address = %s;
     """
     
     with conn.cursor() as cur:
         cur.executemany(query, scanned_addresses)
     conn.commit()
-    print(f"Zaktualizowano status na 'DONE' dla {len(scanned_addresses)} adresów.")
+    print(f"[+] Updated status to 'DONE' for {len(scanned_addresses)} scanned masters.")
+
+def mark_known_subaccounts_as_done(conn):
+    """
+    Updates status to 'DONE' for all wallets that are assigned as subaccounts 
+    in the main table.
+    """
+    query = """
+        UPDATE wallet_processing_queue
+        SET status = 'DONE',
+            completed_at = NOW()
+        WHERE wallet_address IN (
+            SELECT address 
+            FROM wallets 
+            WHERE master_address IS NOT NULL
+        ) AND status != 'DONE';
+    """
+    with conn.cursor() as cur:
+        cur.execute(query)
+        updated_rows = cur.rowcount 
+    conn.commit()
+    print(f"[+] Marked {updated_rows} known subaccounts as 'DONE'.")
 
 def main():
     with psycopg.connect(**DB_CONFIG) as conn:
@@ -104,8 +132,11 @@ def main():
 
         load_unique_wallets(conn, WALLETS_CSV)
         load_subaccounts(conn, SUBACCOUNTS_CSV)
+
         populate_queue(conn)
+
         mark_scanned_masters_as_done(conn, SCANNED_TXT)
+        mark_known_subaccounts_as_done(conn)
 
 if __name__ == "__main__":
     main()

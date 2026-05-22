@@ -21,5 +21,5 @@ dependencies = [
     "pandas",
     "numpy",
     "python-dotenv",
-    "psycopg"
+    "psycopg[binary]"
 ]
