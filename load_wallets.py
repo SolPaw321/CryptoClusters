@@ -1,21 +1,11 @@
 import os
 import csv
-import psycopg
+from pathlib import Path
 
-from dotenv import load_dotenv
 from src.paths import PATHS
+from src.database.db_client import HyperliquidClient
 
-load_dotenv(dotenv_path=PATHS.ENV)
-
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST", "127.0.0.1"),
-    "port": int(os.getenv("DB_PORT", 5432))
-}
-
-def load_unique_wallets(conn, filepath):
+def load_unique_wallets(conn, filepath: Path) -> None:
     """Loads unique wallets from CSV into the main wallets table."""
     with open(filepath, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -31,7 +21,7 @@ def load_unique_wallets(conn, filepath):
     conn.commit()
     print(f"[*] Loaded file: {filepath.name}")
 
-def load_subaccounts(conn, filepath):
+def load_subaccounts(conn, filepath: Path) -> None:
     """Loads subaccounts and their master relationships from CSV."""
     with open(filepath, mode='r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
@@ -65,7 +55,7 @@ def load_subaccounts(conn, filepath):
     conn.commit()
     print(f"[*] Loaded file: {filepath.name} (Subaccounts: {len(subs)})")
 
-def populate_queue(conn):
+def populate_queue(conn) -> None:
     """Populates the processing queue with all distinct addresses from the wallets table."""
     query = """
         INSERT INTO wallet_processing_queue (wallet_address)
@@ -77,7 +67,7 @@ def populate_queue(conn):
     conn.commit()
     print("[*] Inserted new addresses from the main table into the processing queue.")
 
-def mark_scanned_masters_as_done(conn, filepath):
+def mark_scanned_masters_as_done(conn, filepath: Path) -> None:
     """Updates status to 'DONE' for addresses already present in the scanned masters text file."""
     if not os.path.exists(filepath):
         print(f"[-] File {filepath} does not exist. Skipping status update.")
@@ -102,7 +92,7 @@ def mark_scanned_masters_as_done(conn, filepath):
     conn.commit()
     print(f"[+] Updated status to 'DONE' for {len(scanned_addresses)} scanned masters.")
 
-def mark_known_subaccounts_as_done(conn):
+def mark_known_subaccounts_as_done(conn) -> None:
     """
     Updates status to 'DONE' for all wallets that are assigned as subaccounts 
     in the main table.
@@ -123,13 +113,14 @@ def mark_known_subaccounts_as_done(conn):
     conn.commit()
     print(f"[+] Marked {updated_rows} known subaccounts as 'DONE'.")
 
-def main():
-    with psycopg.connect(**DB_CONFIG) as conn:
-        
-        WALLETS_CSV = PATHS.ADDRESSES / "unique_wallets.csv"
-        SUBACCOUNTS_CSV = PATHS.ADDRESSES / "only_subaccounts.csv"
-        SCANNED_TXT = PATHS.ADDRESSES_TEMP / "scanned_masters.txt" 
+def main() -> None:
+    hl_client = HyperliquidClient()
 
+    WALLETS_CSV = PATHS.ADDRESSES / "unique_wallets.csv"
+    SUBACCOUNTS_CSV = PATHS.ADDRESSES / "only_subaccounts.csv"
+    SCANNED_TXT = PATHS.ADDRESSES_TEMP / "scanned_masters.txt" 
+
+    with hl_client.get_db_connection() as conn:
         load_unique_wallets(conn, WALLETS_CSV)
         load_subaccounts(conn, SUBACCOUNTS_CSV)
 

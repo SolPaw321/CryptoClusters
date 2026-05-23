@@ -1,74 +1,17 @@
 import os
 import pandas as pd
-import requests
-import time
 import csv
-import psycopg
 from pathlib import Path
 from typing import List, Dict, Any, Set
-from dotenv import load_dotenv
 
 from src.paths import PATHS
+from src.database.db_client import HyperliquidClient
+from src.database.hl_endpoints import HyperliquidEndpoints
 
 # --- PATH CONFIGURATION ---
 OUTPUT_CSV = PATHS.ADDRESSES / "only_subaccounts.csv"
 SCANNED_CACHE_FILE = PATHS.ADDRESSES_TEMP / "scanned_masters.txt"
-
-API_URL = "https://api.hyperliquid.xyz/info"
 BATCH_SIZE = 10 
-
-# --- HYPERLIQUID API RATE LIMITS ---
-WEIGHT_PER_SEC = 1200 / 60.0
-WEIGHT_USER_ROLE = 60
-WEIGHT_SUBACCOUNTS = 20
-
-SLEEP_USER_ROLE = (WEIGHT_USER_ROLE / WEIGHT_PER_SEC) + 0.1    
-SLEEP_SUBACCOUNTS = (WEIGHT_SUBACCOUNTS / WEIGHT_PER_SEC) + 0.1 
-
-# --- DB CONFIGURATION ---
-load_dotenv(dotenv_path=PATHS.ENV)
-
-DB_CONFIG = {
-    "dbname": os.getenv("DB_NAME"),
-    "user": os.getenv("DB_USER"),
-    "password": os.getenv("DB_PASSWORD"),
-    "host": os.getenv("DB_HOST", "127.0.0.1"),
-    "port": int(os.getenv("DB_PORT", 5432))
-}
-
-def safe_api_request(payload: dict) -> Any:
-    """Handles API requests with built-in rate limit backups and connection retries."""
-    attempt = 0
-    while True:
-        try:
-            response = requests.post(API_URL, json=payload, timeout=15)
-            if response.status_code == 429:
-                print("\n[!] Rate limit hit. Pausing...")
-                time.sleep(30)
-                continue
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.RequestException as e:
-            attempt += 1
-            sleep_time = min(60, 2 ** attempt)
-            print(f"\n[-] Connection error with API: {e}")
-            print(f"[-] API not available. Retrying in {sleep_time}s (Attempt #{attempt})")
-            time.sleep(sleep_time)
-
-def fetch_master_address(address: str) -> str:
-    """Checks the role of the address via userRole endpoint."""
-    payload = {"type": "userRole", "user": address}
-    data = safe_api_request(payload)
-    role = data.get("role")
-    if role == "subAccount":
-        return data.get("data", {}).get("master", address)
-    return address
-
-def fetch_subaccounts(master_address: str) -> List[Dict[str, Any]]:
-    """Fetch subaccounts list for a given master address."""
-    payload = {"type": "subAccounts", "user": master_address}
-    data = safe_api_request(payload)
-    return data if isinstance(data, list) else []
 
 def load_scanned_masters() -> Set[str]:
     """Load the list of already processed master addresses from the cache file."""
@@ -170,13 +113,15 @@ def main() -> None:
     print(f"[*] --- CONFIGURATION ---")
     print(f"[*] Output CSV Backup: {OUTPUT_CSV}")
     print(f"[*] Cache TXT Backup:  {SCANNED_CACHE_FILE}")
-    print(f"[*] Connecting to DB:  '{DB_CONFIG['dbname']}'...")
     print(f"[*] ---------------------------\n")
 
     scanned_history = load_scanned_masters()
     existing_subaccounts = load_existing_subaccounts()
 
-    with psycopg.connect(**DB_CONFIG) as conn:
+    api_client = HyperliquidClient()
+    endpoints = HyperliquidEndpoints(api_client)
+
+    with api_client.get_db_connection() as conn:
         print("[*] Connected to DB. Starting worker...\n")
         new_count = 0
 
@@ -201,8 +146,7 @@ def main() -> None:
                         scanned_batch.append(address)
                         continue
 
-                    subs = fetch_subaccounts(address)
-                    time.sleep(SLEEP_SUBACCOUNTS) 
+                    subs = endpoints.fetch_subaccounts(address)
 
                     if subs:
                         master = address
@@ -228,16 +172,14 @@ def main() -> None:
                         print(f"[{i}/{len(batch_addresses)}] [MASTER] {master} -> Found {new_in_this_round} new subaccounts.")
 
                     else:
-                        real_master = fetch_master_address(address)
-                        time.sleep(SLEEP_USER_ROLE)
+                        real_master = endpoints.fetch_master_address(address)
                         
                         scanned_batch.append(address)
                         db_masters_batch.append((address,)) 
 
                         if real_master != address:
                             if real_master not in scanned_history and real_master not in scanned_batch:
-                                master_subs = fetch_subaccounts(real_master)
-                                time.sleep(SLEEP_SUBACCOUNTS)
+                                master_subs = endpoints.fetch_subaccounts(real_master)
                                 
                                 db_masters_batch.append((real_master,))
                                 new_in_this_round = 0
@@ -262,6 +204,7 @@ def main() -> None:
                         else:
                             print(f"[{i}/{len(batch_addresses)}] [LONELY MASTER] {address} -> Found 0 subaccounts.")
 
+                # Flush logic remains identical
                 append_to_csv(OUTPUT_CSV, accounts_batch)
                 append_to_cache(SCANNED_CACHE_FILE, scanned_batch)
                 scanned_history.update(scanned_batch)
