@@ -58,6 +58,8 @@ CREATE TABLE IF NOT EXISTS clearinghouse_state_history (
     total_margin_used NUMERIC NOT NULL DEFAULT 0,
     withdrawable NUMERIC NOT NULL DEFAULT 0,
     
+    raw_state JSONB NOT NULL,
+
     PRIMARY KEY (wallet_address, snapshot_time)
 );
 

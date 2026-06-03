@@ -1,13 +1,8 @@
-import pandas as pd
 from typing import List, Dict, Set, Tuple
 
-from src.paths import PATHS
 from src.database.hl_endpoints import HyperliquidEndpoints
 import src.database.repository as db
-import src.database.caching as cache
 
-OUTPUT_CSV = PATHS.ADDRESSES / "only_subaccounts.csv"
-SCANNED_CACHE_FILE = PATHS.ADDRESSES_TEMP / "scanned_masters.txt"
 BATCH_SIZE = 10
 
 class SubaccountsDiscovery:
@@ -15,7 +10,7 @@ class SubaccountsDiscovery:
     Discovery Phase Handler.
 
     Encapsulates the state and logic for resolving wallet hierarchies,
-    processing batches, and safely flushing data to persistent storage.
+    processing batches, and safely flushing data to the database.
     """
     def __init__(self, conn, endpoints: HyperliquidEndpoints, existing_subaccounts: Set[str], scanned_history: Set[str]):
         self.conn = conn
@@ -24,7 +19,6 @@ class SubaccountsDiscovery:
         self.scanned_history = scanned_history
 
         # Internal state for the current batch
-        self.accounts_batch: List[Dict] = []
         self.scanned_batch: List[str] = []
         self.db_masters_batch: List[Tuple] = []
         self.db_subs_batch: List[Tuple] = []
@@ -43,12 +37,6 @@ class SubaccountsDiscovery:
             if sub_addr and sub_addr not in self.existing_subaccounts:
                 sub_name = sub.get("name", "Unnamed")
                 
-                self.accounts_batch.append({
-                    "master_address": master_addr,
-                    "subaccount_address": sub_addr,
-                    "discovered_at": pd.Timestamp.now(tz='UTC').isoformat(),
-                    "subaccount_name": sub_name
-                })
                 self.db_subs_batch.append((sub_addr, master_addr, sub_name))
                 self.existing_subaccounts.add(sub_addr)
                 new_in_this_round += 1
@@ -86,21 +74,20 @@ class SubaccountsDiscovery:
             if real_master not in self.scanned_history and real_master not in self.scanned_batch:
                 master_subs = self.endpoints.fetch_subaccounts(real_master)
                 self.db_masters_batch.append((real_master,))
+                
                 added = self._extract_new_subaccounts(real_master, master_subs)
                 self.scanned_batch.append(real_master)
+                
                 print(f"[{index}/{total}] [SUBACCOUNT] Resolved {address[:8]}... -> Discovered New Master: {real_master} -> Found {added} new subaccounts.")
         else:
             print(f"[{index}/{total}] [LONELY MASTER] {address} -> Found 0 subaccounts.")
 
-
     def _flush_batch_to_storage(self, batch_addresses: List[str]) -> None:
         """
-        Flush discovered batch data to local files and the database.
+        Flush discovered batch data strictly to the database.
 
-        :param batch_addresses: list of original pending addresses to mark as DONE
+        :param batch_addresses: list of pending addresses to mark as DONE
         """
-        cache.append_to_csv(self.accounts_batch)
-        cache.append_to_cache(self.scanned_batch)
         self.scanned_history.update(self.scanned_batch)
         
         with self.conn.cursor() as cur:
@@ -118,9 +105,16 @@ class SubaccountsDiscovery:
                         subaccount_name = EXCLUDED.subaccount_name;
                 """, self.db_subs_batch)
 
-        db.mark_batch_as_done(self.conn, batch_addresses)
+        # Ensure all processed addresses are marked DONE
+        addresses_to_mark = list(set(batch_addresses + self.scanned_batch))
+        db.mark_batch_as_done(self.conn, addresses_to_mark)
+        
         self.conn.commit()
-
+        
+        # Clear batch arrays for the next cycle
+        self.scanned_batch.clear()
+        self.db_masters_batch.clear()
+        self.db_subs_batch.clear()
 
     def execute(self) -> bool:
         """
@@ -140,8 +134,9 @@ class SubaccountsDiscovery:
             for i, address in enumerate(batch_addresses, 1):
                 self._process_single_wallet(i, total_in_batch, address)
 
+            new_subs_count = len(self.db_subs_batch)
             self._flush_batch_to_storage(batch_addresses)
-            print(f"[+] [DISCOVERY] Flushed {total_in_batch} addresses. Total {len(self.accounts_batch)} new subaccounts.")
+            print(f"[+] [DISCOVERY] Flushed {total_in_batch} addresses. Total {new_subs_count} new subaccounts.")
             return True
 
         except KeyboardInterrupt:
