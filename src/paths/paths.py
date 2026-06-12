@@ -19,6 +19,7 @@ class Paths:
         DATA (Path): Path to the top-level data directory.
         ADDRESSES (Path): Path to the addresses data directory.
         ADDRESSES_TEMP (Path): Path to the temporary addresses directory.
+        DOCKER (Path): Path to docker directory with its files and scripts.
     """
     _instance: ClassVar["Paths | None"] = None
     _initialized: ClassVar[bool] = False
@@ -32,15 +33,18 @@ class Paths:
 
         self.PROJECT_ROOT = Path(__file__).resolve().parents[2]
         self.SRC = self.PROJECT_ROOT / "src"
+        self.DOCKER = self.SRC / "docker"
 
         self.DATA = self.PROJECT_ROOT / "data"
         self.ADDRESSES = self.DATA / "addresses"
         self.ADDRESSES_TEMP = self.ADDRESSES / "temp"
+        self.ENV = self.DOCKER / ".env"
 
         self.__ALL_PATHS = (
             self.PROJECT_ROOT,
             self.SRC,
             self.DATA,
+            self.DOCKER,
             self.ADDRESSES,
             self.ADDRESSES_TEMP,
         )

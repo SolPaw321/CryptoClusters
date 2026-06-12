@@ -1,0 +1,55 @@
+services:
+  pg_db:
+    image: postgres:18-alpine
+    container_name: crypto_clusters_db
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - POSTGRES_USER=${DB_USER}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME}
+    ports:
+      - ${DB_PORT}:5432
+    volumes:
+      - ./postgres_data:/var/lib/postgresql
+      - ./init-db:/docker-entrypoint-initdb.d
+
+  pg_backup:
+    image: postgres:18-alpine
+    container_name: crypto_clusters_backup
+    restart: always
+    depends_on:
+      - pg_db
+    env_file:
+      - .env
+    environment:
+      - PGUSER=${DB_USER}
+      - PGPASSWORD=${DB_PASSWORD}
+      - PGHOST=pg_db
+      - PGDATABASE=${DB_NAME}
+    volumes:
+      - ./backups:/backups
+    command: >
+      /bin/sh -c "
+      echo 'Starting backup service...';
+      while true; do
+        echo 'Checking if database is ready to accept connections...';
+        until pg_isready -h pg_db -p 5432 -U $$PGUSER; do
+          echo 'Database is not ready yet. Waiting 2 seconds...';
+          sleep 2;
+        done;
+        
+        timestamp=$$(date +'%Y-%m-%d_%H-%M-%S');
+        echo \"[$$timestamp] Starting database dump...\";
+        pg_dump -F c -f /backups/dump_$$timestamp.backup;
+        
+        echo \"[$$timestamp] Cleaning up old backups...\";
+        for file in $$(ls -t /backups/*.backup 2>/dev/null | tail -n +25); do
+          find \"$$file\" -mtime +3 -type f -delete;
+        done
+        
+        echo \"[$$timestamp] Backup and cleanup done. Sleeping for 1 hour.\";
+        sleep 3600;
+      done
+      "
